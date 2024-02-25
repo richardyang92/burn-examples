@@ -1,0 +1,2 @@
+[workspace]
+members = ["fashion_mnist", "yolo_v1"]
