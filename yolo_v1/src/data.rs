@@ -1,7 +1,8 @@
-use std::{fs::{read_dir, File}, io::BufReader, path::Path, usize};
+use std::{cmp::min, fs::{read_dir, File}, io::BufReader, path::Path, usize, vec};
 
 
-use burn::{data::{dataloader::batcher::Batcher, dataset::Dataset}, tensor::{backend::Backend, Data, Int, Tensor}};
+use burn::{data::{dataloader::batcher::Batcher, dataset::Dataset}, tensor::{backend::Backend, Data, Tensor}};
+use derive_new::new;
 use image::{imageops::FilterType::Nearest, io::Reader as ImageReader, GenericImageView};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use xml::{common::Position, reader::XmlEvent, ParserConfig};
@@ -53,7 +54,6 @@ impl VocObjBox {
 
 #[derive(Debug)]
 pub struct VocLabel {
-    filename: String,
     width: usize,
     height: usize,
     obj_boxes: Vec<VocObjBox>,
@@ -66,7 +66,6 @@ impl VocLabel {
             .ignore_root_level_whitespace(false)
             .create_reader(BufReader::new(file));
 
-        let mut filename = String::new();
         let mut width = 0;
         let mut height = 0;
         let mut obj_boxes = Vec::<VocObjBox>::new();
@@ -79,11 +78,11 @@ impl VocLabel {
                     // print!("{}\t", reader.position());
     
                     match e {
-                        XmlEvent::StartDocument { version, encoding, .. } => {
-                            println!("StartDocument({version}, {encoding})");
+                        XmlEvent::StartDocument { .. } => {
+                            // println!("StartDocument({version}, {encoding})");
                         },
                         XmlEvent::EndDocument => {
-                            println!("EndDocument");
+                            // println!("EndDocument");
                             break;
                         }
                         XmlEvent::StartElement { name, .. } => {
@@ -103,9 +102,7 @@ impl VocLabel {
                         XmlEvent::Characters(data) => {
                             // println!(r#"Characters("{}")"#, data.escape_debug());
                             let element_name_str = element_name.as_str();
-                            if element_name_str.eq("filename") {
-                                filename = data;
-                            } else if element_name_str.eq("width") {
+                            if element_name_str.eq("width") {
                                 width = data.parse().unwrap_or(0);
                             } else if element_name_str.eq("height") {
                                 height = data.parse().unwrap_or(0);
@@ -152,7 +149,6 @@ impl VocLabel {
             }
         }
         Self {
-            filename,
             width: WIDTH,
             height: HEIGHT,
             obj_boxes,
@@ -161,28 +157,29 @@ impl VocLabel {
 }
 
 pub trait ItemLoader {
-    fn load_image(&self) -> Option<[[[u8; WIDTH]; HEIGHT]; 3]>;
-    fn load_lable(&self) -> Option<[[[f32; 30]; SEGMENT]; SEGMENT]>;
-}
-
-pub struct VocItem {
-    image: [[[u8; WIDTH]; HEIGHT]; 3],
-    label: [[[f32; 30]; SEGMENT]; SEGMENT],
+    fn load_image(&self) -> Option<Vec<u8>>;
+    fn load_lable(&self) -> Option<Vec<f32>>;
 }
 
 #[derive(Debug, Clone)]
+pub struct VocItem {
+    image: Vec<u8>,
+    label: Vec<f32>,
+}
+
+#[derive(Debug, Clone, new)]
 pub struct VocItemLoader {
     pub image_path: String,
     pub label_path: String,
 }
 
 impl ItemLoader for VocItemLoader {
-    fn load_image(&self) -> Option<[[[u8; WIDTH]; HEIGHT]; 3]> {
+    fn load_image(&self) -> Option<Vec<u8>> {
         let image_path = &self.image_path;
+        // println!("load image: {}", image_path);
         let mut jpg = ImageReader::open(image_path)
             .expect(format!("load image {} failed", image_path).as_str())
             .decode().expect(format!("decode image {} failed", image_path).as_str());
-
         // resize image to 448x448
         if jpg.width() != WIDTH as u32 || jpg.height() != HEIGHT as u32 {
             jpg = jpg.resize_exact(WIDTH as u32, HEIGHT as u32, Nearest);
@@ -191,50 +188,49 @@ impl ItemLoader for VocItemLoader {
             image::DynamicImage::ImageRgb8(rgb) => rgb,
             _ => jpg.to_rgb8(),
         };
-
-        let mut rgb = [[[0; WIDTH]; HEIGHT]; 3];
- 
+        let mut rgb = vec![0u8; WIDTH * HEIGHT * 3];
         for (x, y, pixel) in image_buffer.enumerate_pixels() {
-            rgb[0][x as usize][y as usize] = pixel.0[0];
-            rgb[1][x as usize][y as usize] = pixel.0[1];
-            rgb[2][x as usize][y as usize] = pixel.0[2];
+            // println!("(i,j)=({}, {})", x, y);
+            rgb[x as usize * WIDTH + y as usize] = pixel.0[0];
+            rgb[WIDTH * HEIGHT + x as usize * WIDTH + y as usize] = pixel.0[1];
+            rgb[WIDTH * HEIGHT * 2 + x as usize * WIDTH + y as usize] = pixel.0[2];
         }
         Some(rgb)
     }
 
-    fn load_lable(&self) -> Option<[[[f32; 30]; SEGMENT]; SEGMENT]> {
+    fn load_lable(&self) -> Option<Vec<f32>> {
         let label_path = &self.label_path;
         let voc_label = VocLabel::new(Path::new(label_path));
-        println!("origin label: {:?}", voc_label);
+        // println!("origin label: {:?}", label_path);
 
         if voc_label.width != WIDTH || voc_label.height != HEIGHT {
             return None;
         }
 
-        let mut label = [[[0f32; 30]; SEGMENT]; SEGMENT];
+        let mut label = vec![0f32; 30 * SEGMENT * SEGMENT];
 
-        let cell_size = WIDTH / SEGMENT;
+        let cell_size_x = WIDTH / SEGMENT;
+        let cell_size_y = HEIGHT / SEGMENT;
         
         for obj_box in voc_label.obj_boxes {
             let class_idx = obj_box.get_label_class_idx();
 
-            let (box_w, box_h) = (obj_box.xmax - obj_box.xmin, obj_box.ymax - obj_box.ymin);
+            let (box_w, box_h) = (obj_box.xmax.abs_diff(obj_box.xmin), obj_box.ymax.abs_diff(obj_box.ymin));
             let (cx, cy) = (obj_box.xmin + box_w / 2, obj_box.ymin + box_h / 2);
-            let (i, j) = (cx / cell_size, cy / cell_size);
-            let (delta_x, delta_y) = (((cx - cell_size * i) as f32) / cell_size as f32,
-                ((cy - cell_size * j) as f32) / cell_size as f32);
-
-            label[i][j][0] = delta_x;
-            label[i][j][1] = delta_y;
-            label[i][j][2] = box_w as f32/ WIDTH as f32;
-            label[i][j][3] = box_h as f32 / WIDTH as f32;
-            label[i][j][4] = 1f32;
-            label[i][j][5] = delta_x;
-            label[i][j][6] = delta_y;
-            label[i][j][7] = box_w as f32/ WIDTH as f32;
-            label[i][j][8] = box_h as f32 / WIDTH as f32;
-            label[i][j][9] = 1f32;
-            label[i][j][class_idx + 9] = 1f32;
+            let (i, j) = (min(cx / cell_size_x, 6), min(cy / cell_size_y, 6));
+            let (delta_x, delta_y) = (((cx - cell_size_x * i) as f32) / cell_size_x as f32,
+                ((cy - cell_size_y * j) as f32) / cell_size_y as f32);
+            label[i * SEGMENT + j] = delta_x;
+            label[1 * SEGMENT * SEGMENT + i * SEGMENT + j] = delta_y;
+            label[2 * SEGMENT * SEGMENT + i * SEGMENT + j] = box_w as f32/ WIDTH as f32;
+            label[3 * SEGMENT * SEGMENT + i * SEGMENT + j] = box_h as f32 / HEIGHT as f32;
+            label[4 * SEGMENT * SEGMENT + i * SEGMENT + j] = 1f32;
+            label[5 * SEGMENT * SEGMENT + i * SEGMENT + j] = delta_x;
+            label[6 * SEGMENT * SEGMENT + i * SEGMENT + j] = delta_y;
+            label[7 * SEGMENT * SEGMENT + i * SEGMENT + j] = box_w as f32/ WIDTH as f32;
+            label[8 * SEGMENT * SEGMENT + i * SEGMENT + j] = box_h as f32 / HEIGHT as f32;
+            label[9 * SEGMENT * SEGMENT + i * SEGMENT + j] = 1f32;
+            label[(class_idx + 9) * SEGMENT * SEGMENT + i * SEGMENT + j] = 1f32;
         }
         Some(label)
     }
@@ -250,26 +246,27 @@ impl<B: Backend> YoloV1Batcher<B> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct YoloV1Batch<B: Backend> {
     pub images: Tensor<B, 4>,
     pub targets: Tensor<B, 4>,
 }
 
-impl<B: Backend> Batcher<VocItemLoader, YoloV1Batch<B>> for YoloV1Batcher<B> {
-    fn batch(&self, items: Vec<VocItemLoader>) -> YoloV1Batch<B> {
+impl<B: Backend> Batcher<VocItem, YoloV1Batch<B>> for YoloV1Batcher<B> {
+    fn batch(&self, items: Vec<VocItem>) -> YoloV1Batch<B> {
         let images = items
             .iter()
-            .filter_map(|item_path| item_path.load_image())
-            .map(|image| Data::<u8, 3>::from(image))
-            .map(|data| Tensor::<B, 3>::from_data(data.convert(), &self.device))
+            .map(|item| item.image.as_slice())
+            .map(|image| Data::from(image))
+            .map(|data| Tensor::<B, 1>::from_data(data.convert(), &self.device))
             .map(|tensor| tensor.reshape([1, 3, HEIGHT, WIDTH]))
             .collect();
 
         let targets = items
             .iter()
-            .filter_map(|label_path| label_path.load_lable())
-            .map(|label| Data::<f32, 3>::from(label))
-            .map(|data| Tensor::<B, 3>::from_data(data.convert(), &self.device))
+            .map(|item| item.label.as_slice())
+            .map(|label| Data::from(label))
+            .map(|data| Tensor::<B, 1>::from_data(data.convert(), &self.device))
             .map(|tensor| tensor.reshape([1, 30, SEGMENT, SEGMENT]))
             .collect();
 
@@ -277,19 +274,24 @@ impl<B: Backend> Batcher<VocItemLoader, YoloV1Batch<B>> for YoloV1Batcher<B> {
         let targets = Tensor::cat(targets, 0).to_device(&self.device);
 
         YoloV1Batch { images, targets }
+        // todo!()
     }
 }
 
 #[derive(Debug)]
-pub struct VocDataSet {
+pub struct VocDataset {
     voc_items: Vec<VocItemLoader>
 }
 
-impl Dataset<VocItem> for VocDataSet {
+impl Dataset<VocItem> for VocDataset {
     fn get(&self, index: usize) -> Option<VocItem> {
+        // println!("index={}", index);
         let item_path = &self.voc_items[index];
-        let image = item_path.load_image();
+        // println!("item_path={:?}", item_path);
         let label = item_path.load_lable();
+        // println!("label={:?}", label);
+        let image = item_path.load_image();
+        // println!("image={:?}", image);
 
         if let Some(image) = image {
             if let Some(label) = label {
@@ -304,7 +306,7 @@ impl Dataset<VocItem> for VocDataSet {
     }
 }
 
-impl VocDataSet {
+impl VocDataset {
     pub fn new(voc_path: &str) -> Self {
         let voc_dir = Path::new(voc_path);
         let image_dir = voc_dir.join("JPEGImages");
@@ -338,8 +340,13 @@ impl VocDataSet {
     pub fn split_by_ratio(&self, ratio: usize) -> (Self, Self) {
         let total_len = self.voc_items.len();
         let split_index = (ratio * total_len / 10).min(total_len - 1);
-        let (first_slice, second_silce) = self.voc_items.split_at(split_index);
-        (Self { voc_items: first_slice.to_vec() }, Self { voc_items: second_silce.to_vec() })
+        let (train_slice, rest_slice) = self.voc_items.split_at(split_index);
+
+        let rest_vec = rest_slice.to_vec();
+        let second_slice_len = rest_slice.len();
+        let split_index = (2 * second_slice_len / 3).min(second_slice_len - 1);
+        let (valid_slice, _) = rest_vec.split_at(split_index);
+        (Self { voc_items: train_slice.to_vec() }, Self { voc_items: valid_slice.to_vec() })
     }
 
     fn load_file_names(image_dir: &Path, _suffix: &str) -> Vec<String> {

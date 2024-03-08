@@ -1,57 +1,160 @@
-use burn::{config::Config, module::Module, nn::{conv::{Conv2d, Conv2dConfig}, pool::{MaxPool2d, MaxPool2dConfig}, Linear, LinearConfig, PaddingConfig2d}, tensor::{backend::{AutodiffBackend, Backend}, Float, Tensor}, train::{metric::{Adaptor, LossInput}, TrainOutput, TrainStep, ValidStep}};
+use std::{cmp::{max_by, min_by}, fmt::Display};
+
+use burn::{config::Config, module::Module, nn::{conv::{Conv2d, Conv2dConfig}, pool::{MaxPool2d, MaxPool2dConfig}, Linear, LinearConfig, PaddingConfig2d}, tensor::{backend::{AutodiffBackend, Backend}, Float, Tensor}, train::{metric::{Adaptor, LossInput}, RegressionOutput, TrainOutput, TrainStep, ValidStep}};
 
 use crate::data::YoloV1Batch;
 
 use derive_new::new;
+use itertools::iproduct;
+
+#[derive(Debug, Clone, Copy, new)]
+pub struct BBox {
+    xmin: f32,
+    ymin: f32,
+    xmax: f32,
+    ymax: f32,
+    prob: f32,
+}
+
+impl From<&[f32]> for BBox {
+    fn from(value: &[f32]) -> Self {
+        BBox {
+            xmin: value[0],
+            ymin: value[1],
+            xmax: value[2],
+            ymax: value[3],
+            prob: value[4],
+        }
+    }
+}
 
 #[derive(Module, Debug, Clone, new)]
 pub struct YoloV1Loss {
-    segments: usize,
-    boxes: usize,
-    l_coord: usize,
+    l_coord: f32,
     l_noobj: f32,
 }
 
 impl YoloV1Loss {
+    fn has_object(&self, probs: &[f32]) -> bool {
+        let mut has_obj = false;
 
-    fn compute_iou<B: Backend>(&self, boxes_1: Vec<[f32; 4]>, boxes_2: Vec<[f32; 4]>) -> Tensor<B, 2> {
-        todo!()
+        for i in 0..20 {
+            if probs[i] != 0f32 {
+                has_obj = true;
+                break;
+            }
+        }
+        has_obj
     }
 
-    pub fn forward<B: Backend>(&self, image: Tensor<B, 4>, target: Tensor<B, 4>, device: &B::Device) -> Tensor<B, 1, Float> {
-        todo!()
+    fn compute_iou<B: Backend>(&self, box1: BBox, box2: BBox) -> f32 {
+        let comparator = |f1: &f32, f2: &f32| { f1.partial_cmp(f2).unwrap() };
+        let h = max_by(0f32, min_by(box1.ymax, box2.ymax, comparator)
+            - max_by(box1.ymin, box2.ymin, comparator), comparator);
+        let w = max_by(0f32, min_by(box1.xmax, box2.xmax, comparator)
+            - max_by(box1.xmin, box2.xmin, comparator), comparator);
+        let inter = h * w;
+        let area_box1 = (box1.xmax - box1.xmin) * (box1.ymax - box1.ymin);
+        let area_box2 = (box2.xmax - box2.xmin) * (box2.ymax - box2.ymin);
+        let union = area_box1 + area_box2 - inter;
+        inter / union
+    }
+
+    fn create_bboxes<B: Backend>(&self, predict: &Tensor<B, 3>, i: usize, j: usize) -> (bool, (BBox, BBox), [f32; 20]) {
+        let label_slice: Tensor<B, 1> = predict.clone().slice([0..30, i..i+1, j..j+1]).flatten::<1>(0, 2);
+        let label_vec = label_slice.to_data().convert::<f32>().value;
+        let box_1 = &label_vec[0..5];
+        let box_2 = &label_vec[5..10];
+        let probs = &label_vec[10..30];
+
+        let mut prob_arr = [0f32; 20];
+        prob_arr.copy_from_slice(probs);
+        
+        (self.has_object(probs), (BBox::from(box_1), BBox::from(box_2)), prob_arr)
+    }
+
+    pub fn forward<B: Backend>(&self, predicts: Tensor<B, 4>, targets: Tensor<B, 4>, device: &B::Device) -> Tensor<B, 1, Float> {
+        let predicts = predicts.detach();
+        let [_, _, segment_h, segment_w] = predicts.dims();
+        let predict_vec: Vec<Tensor<B, 3>> = predicts.iter_dim(0).map(|predict| predict.squeeze(0)).collect();
+        let target_vec: Vec<Tensor<B, 3>> = targets.iter_dim(0).map(|target| target.squeeze(0)).collect();
+
+        let batch_items: Vec<(Tensor<B, 3>, Tensor<B, 3>)> = predict_vec.into_iter().zip(target_vec).collect();
+
+        let mut loss_vec: Vec<f32> = vec![];
+
+        for (predict, target) in batch_items.into_iter() {
+            let mut loss = 0f32;
+            for (i, j) in iproduct!(0..segment_w, 0..segment_h) {
+                let (target_has_obj, (target_bbox, _), target_probs) = self.create_bboxes(&target, i, j);
+                let (_, (predict_bbox_1, predict_bbox_2), predict_probs) = self.create_bboxes(&predict, i, j);
+                if target_has_obj {
+                    let iou_1 = self.compute_iou::<B>(predict_bbox_1, target_bbox);
+                    let iou_2 = self.compute_iou::<B>(predict_bbox_2, target_bbox);
+                    let choosen_bbox = if iou_1 > iou_2 {
+                        loss += (predict_bbox_1.prob - target_bbox.prob).powi(2);
+                        loss += self.l_noobj * (predict_bbox_2.prob - target_bbox.prob).powi(2);
+                        predict_bbox_1
+                    } else {
+                        loss += self.l_noobj * (predict_bbox_1.prob - target_bbox.prob).powi(2);
+                        loss += (predict_bbox_2.prob - target_bbox.prob).powi(2);
+                        predict_bbox_2
+                    };
+                    loss += self.l_coord * ((choosen_bbox.xmin - target_bbox.xmin).powi(2)
+                        + (choosen_bbox.xmax - target_bbox.xmax).powi(2)
+                        + (choosen_bbox.ymin - target_bbox.ymin).powi(2)
+                        + (choosen_bbox.ymax - target_bbox.ymax).powi(2));
+                    let (wc_sqrt, wt_sqrt) = ((choosen_bbox.xmax - choosen_bbox.xmin).abs().sqrt(), (target_bbox.xmax - target_bbox.xmax).abs().sqrt());
+                    let (hc_sqrt, ht_sqrt) = ((choosen_bbox.ymax - choosen_bbox.ymin).abs().sqrt(), (target_bbox.ymax - target_bbox.ymin).abs().sqrt());
+                    loss += self.l_coord * ((wc_sqrt - wt_sqrt).powi(2) + (hc_sqrt - ht_sqrt).powi(2));
+                    for i in 0..20 {
+                        loss += (predict_probs[i] - target_probs[i]).powi(2);
+                    }
+                } else {
+                    loss += self.l_noobj * (predict_bbox_1.prob - target_bbox.prob).powi(2);
+                    loss += self.l_noobj * (predict_bbox_2.prob - target_bbox.prob).powi(2);
+                }
+            }
+            loss_vec.push(loss);
+        }
+
+        Tensor::<B, 1, Float>::from_floats(loss_vec.as_slice(), device).set_require_grad(true)
     }
 }
 
 #[derive(Config)]
 pub struct YoloV1LossConfig {
-    segments: usize,
-    boxes: usize,
-    l_coord: usize,
+    #[config(default = 5.0)]
+    l_coord: f32,
+    #[config(default = 0.5)]
     l_noobj: f32,
 }
 
 impl YoloV1LossConfig {
-    pub fn init<B: Backend>(&self) -> YoloV1Loss {
+    pub fn init(&self) -> YoloV1Loss {
         YoloV1Loss {
-            segments: self.segments,
-            boxes: self.boxes,
             l_coord: self.l_coord,
             l_noobj: self.l_noobj,
         }
     }
 }
 
-#[derive(new)]
+#[derive(Debug)]
 pub struct YoloV1RegressionOutput<B: Backend> {
     /// The loss.
-    pub loss: Tensor<B, 1>,
-
+    loss: Tensor<B, 1, Float>,
     /// The output.
     pub output: Tensor<B, 4>,
 
     /// The targets.
     pub targets: Tensor<B, 4>,
+}
+
+impl<B: Backend> Display for YoloV1RegressionOutput<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let loss_val: Vec<f32> = self.loss.to_data().convert().value;
+        write!(f, "{}", loss_val[0])
+    }
 }
 
 impl<B: Backend> Adaptor<LossInput<B>> for YoloV1RegressionOutput<B> {
@@ -123,18 +226,19 @@ impl<B: Backend> YoloV1<B> {
         let x = self.pool5.forward(x);
         let x = self.conv6_1.forward(x);
         let x = self.conv6_2.forward(x);
-
         let [batch_size, channels, height, width] = x.dims();
         let x = x.reshape([batch_size, channels * height * width]);
+
         let x = self.fc1.forward(x);
-        self.fc2.forward(x).reshape([batch_size, 30, 7, 7])
+        let x = self.fc2.forward(x);
+        x.reshape([batch_size, 30, 7, 7])
     }
 
     pub fn forward_regression(&self, images: Tensor<B, 4>, targets: Tensor<B, 4>) -> YoloV1RegressionOutput<B> {
         let output = self.forward(images);
-        let loss = YoloV1LossConfig::new(7, 2, 5, 0.5).init::<B>().forward(output.clone(), targets.clone(), &output.device());
+        let loss = YoloV1LossConfig::new().init().forward(output.clone(), targets.clone(), &output.device());
         YoloV1RegressionOutput {
-            loss, output, targets
+            loss, output, targets,
         }
     }
 
@@ -233,7 +337,6 @@ impl YoloV1Config {
 impl<B: AutodiffBackend> TrainStep<YoloV1Batch<B>, YoloV1RegressionOutput<B>> for YoloV1<B> {
     fn step(&self, batch: YoloV1Batch<B>) -> burn::train::TrainOutput<YoloV1RegressionOutput<B>> {
         let item = self.forward_regression(batch.images, batch.targets);
-
         TrainOutput::new(self, item.loss.backward(), item)
     }
 }

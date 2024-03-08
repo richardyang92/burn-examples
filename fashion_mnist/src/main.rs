@@ -13,7 +13,7 @@ fn main() {
 
     let device = WgpuDevice::BestAvailable;
     training::train::<MyAutodiffBackend>(
-        "./model",
+        "./fashion_mnist/model",
         TrainingConfig::new(ModelConfig::new(10, 64 * 5 * 5), AdamConfig::new()),
         device,
     );
