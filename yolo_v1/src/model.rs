@@ -26,8 +26,10 @@ impl From<(&[f32], usize, usize)> for BBox {
         let (box_val, i, j) = (value.0, value.1, value.2);
         let box_w = box_val[2] * WIDTH as f32;
         let box_h = box_val[3] * HEIGHT as f32;
-        let xmin = box_val[0] * SEGMENT as f32 + SEGMENT as f32 * i as f32 - box_w / 2f32;
-        let ymin = box_val[1] * SEGMENT as f32 + SEGMENT as f32 * j as f32 - box_h / 2f32;
+        let cell_size_w = (WIDTH / SEGMENT) as f32;
+        let cell_size_h = (HEIGHT / SEGMENT) as f32;
+        let xmin = box_val[0] * cell_size_w + cell_size_w * i as f32 - box_w / 2f32;
+        let ymin = box_val[1] * cell_size_h + cell_size_h * j as f32 - box_h / 2f32;
 
         let mut box_origin = [
             box_val[0],
@@ -77,11 +79,9 @@ impl YoloV1Loss {
     fn compute_iou<B: Backend>(&self, box1: BBox, box2: BBox) -> f32 {
         let comparator = |f1: &f32, f2: &f32| { f1.partial_cmp(f2).unwrap() };
         let h = max_by(0f32, min_by(box1.ymax, box2.ymax, comparator)
-            - max_by(box1.ymin, box2.ymin, comparator), comparator);
+            - max_by(box1.ymin, box2.ymin, comparator) + 1f32, comparator);
         let w = max_by(0f32, min_by(box1.xmax, box2.xmax, comparator)
-            - max_by(box1.xmin, box2.xmin, comparator), comparator);
-        if h < 0f32 || h > HEIGHT as f32 { return 0f32; }
-        if w < 0f32 || w > HEIGHT as f32 { return 0f32; }
+            - max_by(box1.xmin, box2.xmin, comparator) + 1f32, comparator);
         let inter = h * w;
         let area_box1 = (box1.xmax - box1.xmin).abs() * (box1.ymax - box1.ymin).abs();
         let area_box2 = (box2.xmax - box2.xmin).abs() * (box2.ymax - box2.ymin).abs();
@@ -326,6 +326,87 @@ impl YoloV1Config {
             .with_padding(PaddingConfig2d::Explicit(1, 1)).init(device);
         let fc1 = LinearConfig::new(1024 * self.segments_number * self.segments_number, 4096).init(device);
         let fc2 = LinearConfig::new(4096, 30 * self.segments_number * self.segments_number).init(device);
+
+        YoloV1 {
+            conv1,
+            pool1,
+            conv2,
+            pool2,
+            conv3_1,
+            conv3_2,
+            conv3_3,
+            conv3_4,
+            pool3,
+            conv4_1,
+            conv4_2,
+            conv4_3,
+            conv4_4,
+            conv4_5,
+            conv4_6,
+            conv4_7,
+            conv4_8,
+            conv4_9,
+            conv4_10,
+            pool4,
+            conv5_1,
+            conv5_2,
+            conv5_3,
+            conv5_4,
+            conv5_5,
+            pool5,
+            conv6_1,
+            conv6_2,
+            fc1,
+            fc2,
+        }
+    }
+
+    pub fn init_with<B: Backend>(&self, record: YoloV1Record<B>) -> YoloV1<B> {
+        let conv1 = Conv2dConfig::new([3, 64], [self.segments_number, self.segments_number])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).with_stride([2, 2]).init_with(record.conv1);
+        let pool1 = MaxPool2dConfig::new([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
+        let conv2 = Conv2dConfig::new([64, 192], [3, 3]).init_with(record.conv2);
+        let pool2 = MaxPool2dConfig::new([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
+        let conv3_1 = Conv2dConfig::new([192, 128], [1, 1]).init_with(record.conv3_1);
+        let conv3_2 = Conv2dConfig::new([128, 256], [3, 3]).init_with(record.conv3_2);
+        let conv3_3 = Conv2dConfig::new([256, 256], [1, 1])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv3_3);
+        let conv3_4 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv3_4);
+        let pool3 = MaxPool2dConfig::new([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
+        let conv4_1 = Conv2dConfig::new([512, 256], [1, 1]).init_with(record.conv4_1);
+        let conv4_2 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv4_2);
+        let conv4_3 = Conv2dConfig::new([512, 256], [1, 1])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv4_3);
+        let conv4_4 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv4_4);
+        let conv4_5 = Conv2dConfig::new([512, 256], [1, 1])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv4_5);
+        let conv4_6 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv4_6);
+        let conv4_7 = Conv2dConfig::new([512, 256], [1, 1])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv4_7);
+        let conv4_8 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv4_8);
+        let conv4_9 = Conv2dConfig::new([512, 512], [1, 1])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv4_9);
+        let conv4_10 = Conv2dConfig::new([512, 1024], [3, 3]).init_with(record.conv4_10);
+        let pool4 = MaxPool2dConfig::new([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
+        
+        let conv5_1 = Conv2dConfig::new([1024, 512], [1, 1]).init_with(record.conv5_1);
+        let conv5_2 = Conv2dConfig::new([512, 1024], [3, 3]).init_with(record.conv5_2);
+        let conv5_3 = Conv2dConfig::new([1024, 512], [1, 1])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv5_3);
+        let conv5_4 = Conv2dConfig::new([512, 1024], [3, 3]).init_with(record.conv5_4);
+        let conv5_5 = Conv2dConfig::new([1024, 1024], [3, 3]).init_with(record.conv5_5);
+        let pool5 = MaxPool2dConfig::new([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
+        let conv6_1 = Conv2dConfig::new([1024, 1024], [3, 3])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv6_1);
+        let conv6_2 = Conv2dConfig::new([1024, 1024], [3, 3])
+            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv6_2);
+        let fc1 = LinearConfig::new(1024 * self.segments_number * self.segments_number, 4096).init_with(record.fc1);
+        let fc2 = LinearConfig::new(4096, 30 * self.segments_number * self.segments_number).init_with(record.fc2);
 
         YoloV1 {
             conv1,

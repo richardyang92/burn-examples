@@ -174,8 +174,8 @@ pub trait ItemLoader {
 
 #[derive(Debug, Clone)]
 pub struct VocItem {
-    image: Vec<u8>,
-    label: Vec<f32>,
+    pub image: Vec<u8>,
+    pub label: Vec<f32>,
 }
 
 #[derive(Debug, Clone, new)]
