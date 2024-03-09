@@ -24,10 +24,10 @@ pub struct BBox {
 impl From<(&[f32], usize, usize)> for BBox {
     fn from(value: (&[f32], usize, usize)) -> Self {
         let (box_val, i, j) = (value.0, value.1, value.2);
-        let xmin = box_val[0] + SEGMENT as f32 * i as f32;
-        let ymin = box_val[1] + SEGMENT as f32 * j as f32;
         let box_w = box_val[2] * WIDTH as f32;
         let box_h = box_val[3] * HEIGHT as f32;
+        let xmin = box_val[0] * SEGMENT as f32 + SEGMENT as f32 * i as f32 - box_w / 2f32;
+        let ymin = box_val[1] * SEGMENT as f32 + SEGMENT as f32 * j as f32 - box_h / 2f32;
 
         let mut box_origin = [
             box_val[0],
