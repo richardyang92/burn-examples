@@ -1,11 +1,15 @@
 use std::{cmp::{max_by, min_by}, fmt::Display};
 
-use burn::{config::Config, module::Module, nn::{conv::{Conv2d, Conv2dConfig}, pool::{MaxPool2d, MaxPool2dConfig}, Linear, LinearConfig, PaddingConfig2d}, tensor::{backend::{AutodiffBackend, Backend}, Float, Tensor}, train::{metric::{Adaptor, LossInput}, RegressionOutput, TrainOutput, TrainStep, ValidStep}};
+use burn::{config::Config, module::Module, nn::{conv::{Conv2d, Conv2dConfig}, pool::{MaxPool2d, MaxPool2dConfig}, Linear, LinearConfig, PaddingConfig2d}, tensor::{backend::{AutodiffBackend, Backend}, Float, Tensor}, train::{metric::{Adaptor, LossInput}, TrainOutput, TrainStep, ValidStep}};
 
 use crate::data::YoloV1Batch;
 
 use derive_new::new;
 use itertools::iproduct;
+
+const WIDTH: usize = 448;
+const HEIGHT: usize = 448;
+const SEGMENT: usize = 7;
 
 #[derive(Debug, Clone, Copy, new)]
 pub struct BBox {
@@ -14,16 +18,39 @@ pub struct BBox {
     xmax: f32,
     ymax: f32,
     prob: f32,
+    box_origin: [f32; 4],
 }
 
-impl From<&[f32]> for BBox {
-    fn from(value: &[f32]) -> Self {
+impl From<(&[f32], usize, usize)> for BBox {
+    fn from(value: (&[f32], usize, usize)) -> Self {
+        let (box_val, i, j) = (value.0, value.1, value.2);
+        let xmin = box_val[0] + SEGMENT as f32 * i as f32;
+        let ymin = box_val[1] + SEGMENT as f32 * j as f32;
+        let box_w = box_val[2] * WIDTH as f32;
+        let box_h = box_val[3] * HEIGHT as f32;
+
+        let mut box_origin = [
+            box_val[0],
+            box_val[1],
+            box_val[2],
+            box_val[3]
+        ];
+
+        if box_origin[2] < 0f32 {
+            box_origin[2] = 0f32;
+        }
+
+        if box_origin[3] < 0f32 {
+            box_origin[3] = 0f32;
+        }
+
         BBox {
-            xmin: value[0],
-            ymin: value[1],
-            xmax: value[2],
-            ymax: value[3],
-            prob: value[4],
+            xmin,
+            ymin,
+            xmax: xmin + box_w,
+            ymax: ymin + box_h,
+            prob: box_val[4],
+            box_origin
         }
     }
 }
@@ -53,9 +80,11 @@ impl YoloV1Loss {
             - max_by(box1.ymin, box2.ymin, comparator), comparator);
         let w = max_by(0f32, min_by(box1.xmax, box2.xmax, comparator)
             - max_by(box1.xmin, box2.xmin, comparator), comparator);
+        if h < 0f32 || h > HEIGHT as f32 { return 0f32; }
+        if w < 0f32 || w > HEIGHT as f32 { return 0f32; }
         let inter = h * w;
-        let area_box1 = (box1.xmax - box1.xmin) * (box1.ymax - box1.ymin);
-        let area_box2 = (box2.xmax - box2.xmin) * (box2.ymax - box2.ymin);
+        let area_box1 = (box1.xmax - box1.xmin).abs() * (box1.ymax - box1.ymin).abs();
+        let area_box2 = (box2.xmax - box2.xmin).abs() * (box2.ymax - box2.ymin).abs();
         let union = area_box1 + area_box2 - inter;
         inter / union
     }
@@ -70,7 +99,7 @@ impl YoloV1Loss {
         let mut prob_arr = [0f32; 20];
         prob_arr.copy_from_slice(probs);
         
-        (self.has_object(probs), (BBox::from(box_1), BBox::from(box_2)), prob_arr)
+        (self.has_object(probs), (BBox::from((box_1, i, j)), BBox::from((box_2, i, j))), prob_arr)
     }
 
     pub fn forward<B: Backend>(&self, predicts: Tensor<B, 4>, targets: Tensor<B, 4>, device: &B::Device) -> Tensor<B, 1, Float> {
@@ -94,21 +123,20 @@ impl YoloV1Loss {
                     let choosen_bbox = if iou_1 > iou_2 {
                         loss += (predict_bbox_1.prob - target_bbox.prob).powi(2);
                         loss += self.l_noobj * (predict_bbox_2.prob - target_bbox.prob).powi(2);
-                        predict_bbox_1
+                        predict_bbox_1.box_origin
                     } else {
                         loss += self.l_noobj * (predict_bbox_1.prob - target_bbox.prob).powi(2);
                         loss += (predict_bbox_2.prob - target_bbox.prob).powi(2);
-                        predict_bbox_2
+                        predict_bbox_2.box_origin
                     };
-                    loss += self.l_coord * ((choosen_bbox.xmin - target_bbox.xmin).powi(2)
-                        + (choosen_bbox.xmax - target_bbox.xmax).powi(2)
-                        + (choosen_bbox.ymin - target_bbox.ymin).powi(2)
-                        + (choosen_bbox.ymax - target_bbox.ymax).powi(2));
-                    let (wc_sqrt, wt_sqrt) = ((choosen_bbox.xmax - choosen_bbox.xmin).abs().sqrt(), (target_bbox.xmax - target_bbox.xmax).abs().sqrt());
-                    let (hc_sqrt, ht_sqrt) = ((choosen_bbox.ymax - choosen_bbox.ymin).abs().sqrt(), (target_bbox.ymax - target_bbox.ymin).abs().sqrt());
-                    loss += self.l_coord * ((wc_sqrt - wt_sqrt).powi(2) + (hc_sqrt - ht_sqrt).powi(2));
+                    loss += self.l_coord * ((choosen_bbox[0] - target_bbox.box_origin[0])).powi(2);
+                    loss += self.l_coord * ((choosen_bbox[1] - target_bbox.box_origin[1])).powi(2);
+                    loss += self.l_coord * (choosen_bbox[2].sqrt() - target_bbox.box_origin[2].sqrt()).powi(2);
+                    loss += self.l_coord * (choosen_bbox[3].sqrt() - target_bbox.box_origin[3].sqrt()).powi(2);
                     for i in 0..20 {
-                        loss += (predict_probs[i] - target_probs[i]).powi(2);
+                        if target_probs[i] > 0f32 {
+                            loss += (predict_probs[i] - target_probs[i]).powi(2);
+                        }
                     }
                 } else {
                     loss += self.l_noobj * (predict_bbox_1.prob - target_bbox.prob).powi(2);

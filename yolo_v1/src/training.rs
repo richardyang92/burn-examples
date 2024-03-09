@@ -1,24 +1,24 @@
 
-use burn::{config::Config, data::{dataloader::DataLoaderBuilder, dataset::Dataset}, module::Module, optim::AdamWConfig, record::CompactRecorder, tensor::backend::AutodiffBackend, train::{metric::{store::{Aggregate, Direction, Split}, LossMetric}, LearnerBuilder, MetricEarlyStoppingStrategy, StoppingCondition}};
+use burn::{config::Config, data::{dataloader::DataLoaderBuilder, dataset::Dataset}, module::Module, optim::AdamWConfig, record::CompactRecorder, tensor::backend::AutodiffBackend, train::{metric::{store::{Aggregate, Direction, Split}, CpuMemory, CpuUse, LossMetric}, LearnerBuilder, MetricEarlyStoppingStrategy, StoppingCondition}};
 
 use crate::{data::{YoloV1Batcher, VocDataset}, model::YoloV1Config};
 
 // const VOC2007_ROOT: &'static str = "/Users/yangyang/Projects/burn-examples/yolo_v1/data";
-const VOC2007_ROOT: &'static str = "/Users/yangyang/Downloads/VOCdevkit 2/VOC2007";
+const VOC2007_ROOT: &'static str = "/media/yang/MyFiles/VOC2007";
 
 #[derive(Config)]
 pub struct TrainingConfig {
     pub model: YoloV1Config,
     pub optimizer: AdamWConfig,
-    #[config(default = 20)]
+    #[config(default = 10)]
     pub num_epochs: usize,
-    #[config(default = 32)]
+    #[config(default = 64)]
     pub batch_size: usize,
     #[config(default = 8)]
     pub num_workers: usize,
-    #[config(default = 42)]
+    #[config(default = 35)]
     pub seed: u64,
-    #[config(default = 0.01)]
+    #[config(default = 0.0001)]
     pub learing_rate: f64,
 }
 
@@ -55,12 +55,16 @@ pub fn train<B: AutodiffBackend>(artifact_dir: &str, config: TrainingConfig, dev
     let learner = LearnerBuilder::new(artifact_dir)
     .metric_train_numeric(LossMetric::new())
     .metric_valid_numeric(LossMetric::new())
+    .metric_train_numeric(CpuUse::new())
+    .metric_valid_numeric(CpuUse::new())
+    .metric_train_numeric(CpuMemory::new())
+    .metric_valid_numeric(CpuMemory::new())
     .with_file_checkpointer(CompactRecorder::new())
     .early_stopping(MetricEarlyStoppingStrategy::new::<LossMetric<B>>(
         Aggregate::Mean,
         Direction::Lowest,
         Split::Valid,
-        StoppingCondition::NoImprovementSince { n_epochs: 3 },
+        StoppingCondition::NoImprovementSince { n_epochs: 1 },
     ))
     .devices(vec![device.clone()])
     .num_epochs(config.num_epochs)
