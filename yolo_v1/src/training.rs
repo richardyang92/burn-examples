@@ -12,13 +12,13 @@ pub struct TrainingConfig {
     pub optimizer: AdamWConfig,
     #[config(default = 10)]
     pub num_epochs: usize,
-    #[config(default = 64)]
+    #[config(default = 32)]
     pub batch_size: usize,
     #[config(default = 8)]
     pub num_workers: usize,
     #[config(default = 35)]
     pub seed: u64,
-    #[config(default = 0.0001)]
+    #[config(default = 0.001)]
     pub learing_rate: f64,
 }
 

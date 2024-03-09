@@ -1,5 +1,5 @@
 
-use burn::{backend::{Autodiff, LibTorch}, optim::AdamWConfig};
+use burn::{backend::{Autodiff, LibTorch}, optim::AdamWConfig, tensor::Tensor};
 // use data::{ItemLoader, VocItem, VocItemLoader};
 use training::TrainingConfig;
 

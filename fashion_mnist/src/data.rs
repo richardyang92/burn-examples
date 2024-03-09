@@ -105,7 +105,7 @@ impl FashionMNISTDataset {
 
     fn new(split: &str) -> Self {
         // Download dataset
-        let root = Path::new("/Users/yangyang/Projects/burn-examples/fashion_mnist/data");
+        let root = Path::new("./fashion_mnist/data");
 
         // MNIST is tiny so we can load it in-memory
         // Train images (u8): 28 * 28 * 60000 = 47.04Mb
