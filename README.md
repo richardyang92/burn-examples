@@ -10,4 +10,4 @@ some neural networks implemented by burn framework:
    
    **runing cmd**: `cargo run --package yolo_v1`
    
-   **current status**: The code runs smoothly, but the training process cannot be completed as the loss stops decreasing at around 21, leading to its termination by the burn framework. I'm still investigating the reasons behind this.
+   **current status**: The code runs smoothly, but the training process cannot be completed as the loss stops decreasing at around 14, leading to its termination by the burn framework. I'm still investigating the reasons behind this.
