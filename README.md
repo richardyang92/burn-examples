@@ -3,7 +3,9 @@ some neural networks implemented by burn framework:
 
 ## 1. bigram
 
-   **runing cmd**: `cargo run --package bigram`
+   **runing cmd**:
+   
+   if you want to train this model, please run `cargo run --package bigram train`, or you can just run `cargo run --package bigram generate` to generate some characters.
    
    **training result**: accuracy is about 35% for 10 epochs training, quite normal for this simplest language model.
    
