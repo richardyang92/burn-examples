@@ -1,4 +1,4 @@
-use burn::{config::Config, module::Module, nn::{loss::CrossEntropyLossConfig, Embedding, EmbeddingConfig}, tensor::{backend::{AutodiffBackend, Backend}, Int, Tensor}, train::{ClassificationOutput, TrainOutput, TrainStep, ValidStep}};
+use burn::{config::Config, module::Module, nn::{loss::CrossEntropyLossConfig, Embedding, EmbeddingConfig, Linear, LinearConfig}, tensor::{backend::{AutodiffBackend, Backend}, Int, Tensor}, train::{ClassificationOutput, TrainOutput, TrainStep, ValidStep}};
 
 
 use crate::data::BigramBatch;
@@ -7,20 +7,22 @@ use crate::data::BigramBatch;
 pub struct BigramLanageModelConfig {
     #[config(default = 65)]
     vocab_size: usize,
-    #[config(default = 65)]
+    #[config(default = 130)]
     d_model: usize,
 }
 
 impl BigramLanageModelConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> BigramLanageModel<B> {
         BigramLanageModel {
-            embedding: EmbeddingConfig::new(self.vocab_size, self.d_model).init(device)
+            embedding: EmbeddingConfig::new(self.vocab_size, self.d_model).init(device),
+            linear: LinearConfig::new(self.d_model, self.vocab_size).init(device),
         }
     }
 
     pub fn init_with<B: Backend>(&self, record: BigramLanageModelRecord<B>) -> BigramLanageModel<B> {
         BigramLanageModel {
-            embedding: EmbeddingConfig::new(self.vocab_size, self.d_model).init_with(record.embedding)
+            embedding: EmbeddingConfig::new(self.vocab_size, self.d_model).init_with(record.embedding),
+            linear: LinearConfig::new(self.d_model, self.vocab_size).init_with(record.linear),
         }
     }
 }
@@ -28,11 +30,13 @@ impl BigramLanageModelConfig {
 #[derive(Module, Debug)]
 pub struct BigramLanageModel<B: Backend> {
     embedding: Embedding<B>,
+    linear: Linear<B>,
 }
 
 impl<B: Backend> BigramLanageModel<B> {
     pub fn forward(&self, input: Tensor<B, 2, Int>) -> Tensor<B, 3> {
-        self.embedding.forward(input)
+        let x = self.embedding.forward(input);
+        self.linear.forward(x)
     }
 
     pub fn forward_classification(&self, input: Tensor<B, 2, Int>, targets: Tensor<B, 2, Int>) -> ClassificationOutput<B> {

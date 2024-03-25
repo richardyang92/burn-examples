@@ -9,7 +9,7 @@ const TOKENIZER_VOCAB: &str = "bigram/data/tokenizer.txt";
 pub struct TrainingConfig {
     pub model: BigramLanageModelConfig,
     pub optimizer: AdamWConfig,
-    #[config(default = 10)]
+    #[config(default = 4)]
     pub num_epochs: usize,
     #[config(default = 64)]
     pub batch_size: usize,
