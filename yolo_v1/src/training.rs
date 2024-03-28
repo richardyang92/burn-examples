@@ -3,9 +3,9 @@ use burn::{config::Config, data::{dataloader::DataLoaderBuilder, dataset::Datase
 
 use crate::{data::{YoloV1Batcher, VocDataset}, model::YoloV1Config};
 
-// const VOC2007_ROOT: &'static str = "/Users/yangyang/Downloads/VOCdevkit 2/VOC2007";
+const VOC2007_ROOT: &'static str = "/Users/yangyang/Downloads/VOCdevkit 2/VOC2007";
 // const VOC2007_ROOT: &'static str = "/Users/yangyang/Projects/burn-examples/yolo_v1/data";
-const VOC2007_ROOT: &'static str = "/media/yang/MyFiles/VOC2007";
+// const VOC2007_ROOT: &'static str = "/media/yang/MyFiles/VOC2007";
 
 #[derive(Config)]
 pub struct TrainingConfig {

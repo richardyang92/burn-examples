@@ -1,6 +1,6 @@
 use std::{cmp::{max_by, min_by}, fmt::Display};
 
-use burn::{config::Config, module::Module, nn::{conv::{Conv2d, Conv2dConfig}, pool::{MaxPool2d, MaxPool2dConfig}, Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig2d, ReLU}, tensor::{backend::{AutodiffBackend, Backend}, ElementConversion, Float, Tensor}, train::{metric::{Adaptor, LossInput}, TrainOutput, TrainStep, ValidStep}};
+use burn::{config::Config, module::Module, nn::{conv::{Conv2d, Conv2dConfig}, pool::{MaxPool2d, MaxPool2dConfig}, BatchNorm, BatchNormConfig, Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig2d}, tensor::{backend::{AutodiffBackend, Backend}, ElementConversion, Float, Tensor}, train::{metric::{Adaptor, LossInput}, TrainOutput, TrainStep, ValidStep}};
 
 use crate::data::YoloV1Batch;
 
@@ -128,16 +128,15 @@ impl YoloV1Loss {
                 };
 
                 if target_has_obj {
-                    if resp_bbox.confident > 0f32 {
-                        loss += self.l_coord * ((resp_bbox.box_origin[0] - target_bbox.box_origin[0])).powi(2);
-                        loss += self.l_coord * ((resp_bbox.box_origin[1] - target_bbox.box_origin[1])).powi(2);
-                        loss += self.l_coord * (resp_bbox.box_origin[2].sqrt() - target_bbox.box_origin[2].sqrt()).powi(2);
-                        loss += self.l_coord * (resp_bbox.box_origin[3].sqrt() - target_bbox.box_origin[3].sqrt()).powi(2);
-                        loss += (resp_bbox.confident - target_bbox.confident).powi(2);
-                    }
+                    loss += self.l_coord * ((resp_bbox.box_origin[0] - target_bbox.box_origin[0])).powi(2);
+                    loss += self.l_coord * ((resp_bbox.box_origin[1] - target_bbox.box_origin[1])).powi(2);
+                    loss += self.l_coord * (resp_bbox.box_origin[2].sqrt() - target_bbox.box_origin[2].sqrt()).powi(2);
+                    loss += self.l_coord * (resp_bbox.box_origin[3].sqrt() - target_bbox.box_origin[3].sqrt()).powi(2);
+                    loss += (resp_bbox.confident - target_bbox.confident).powi(2);
+                    loss += self.l_noobj * (no_resp_bbox.confident - 0f32).powi(2);
                 } else {
-                    loss += self.l_noobj * (resp_bbox.confident - target_bbox.confident).powi(2);
-                    loss += self.l_noobj * (no_resp_bbox.confident - target_bbox.confident).powi(2);
+                    loss += self.l_noobj * (resp_bbox.confident - 0f32).powi(2);
+                    loss += self.l_noobj * (no_resp_bbox.confident - 0f32).powi(2);
                 }
 
                 for i in 0..20 {
@@ -206,93 +205,118 @@ impl LeakyReLU {
     }
 }
 
+#[derive(Config)]
+pub struct ConvBlock2dConfig {
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: usize,
+    #[config(default = 1)]
+    stride: usize,
+    #[config(default = 0)]
+    padding: usize,
+}
+
+impl ConvBlock2dConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> ConvBlock2d<B> {
+        let conv2d = Conv2dConfig::new([self.in_channels, self.out_channels], [self.kernel_size, self.kernel_size])
+                .with_padding(PaddingConfig2d::Explicit(self.padding, self.padding)).with_stride([self.stride, self.stride]).init(device);
+        let batch_norm = BatchNormConfig::new(self.out_channels).init(device);
+        let leaky_relu = LeakyReLU::new();
+        ConvBlock2d {
+            conv2d, batch_norm, leaky_relu,
+        }
+    }
+
+    pub fn init_with<B: Backend>(&self, record: ConvBlock2dRecord<B>) -> ConvBlock2d<B> {
+        let conv2d = Conv2dConfig::new([self.in_channels, self.out_channels], [self.kernel_size, self.kernel_size])
+                .with_padding(PaddingConfig2d::Explicit(self.padding, self.padding)).with_stride([self.stride, self.stride]).init_with(record.conv2d);
+        let batch_norm = BatchNormConfig::new(self.out_channels).init_with(record.batch_norm);
+        let leaky_relu = LeakyReLU::new();
+        ConvBlock2d {
+            conv2d, batch_norm, leaky_relu,
+        }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct ConvBlock2d<B: Backend> {
+    conv2d: Conv2d<B>,
+    batch_norm: BatchNorm<B, 2>,
+    leaky_relu: LeakyReLU,
+}
+
+impl<B: Backend> ConvBlock2d<B> {
+    pub fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
+        let x = self.conv2d.forward(input);
+        let x = self.batch_norm.forward(x);
+        self.leaky_relu.forward(x)
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct YoloV1<B: Backend> {
-    conv1: Conv2d<B>,
+    conv1: ConvBlock2d<B>,
     pool1: MaxPool2d,
-    conv2: Conv2d<B>,
+    conv2: ConvBlock2d<B>,
     pool2: MaxPool2d,
-    conv3_1: Conv2d<B>,
-    conv3_2: Conv2d<B>,
-    conv3_3: Conv2d<B>,
-    conv3_4: Conv2d<B>,
+    conv3_1: ConvBlock2d<B>,
+    conv3_2: ConvBlock2d<B>,
+    conv3_3: ConvBlock2d<B>,
+    conv3_4: ConvBlock2d<B>,
     pool3: MaxPool2d,
-    conv4_1: Conv2d<B>,
-    conv4_2: Conv2d<B>,
-    conv4_3: Conv2d<B>,
-    conv4_4: Conv2d<B>,
-    conv4_5: Conv2d<B>,
-    conv4_6: Conv2d<B>,
-    conv4_7: Conv2d<B>,
-    conv4_8: Conv2d<B>,
-    conv4_9: Conv2d<B>,
-    conv4_10: Conv2d<B>,
+    conv4_1: ConvBlock2d<B>,
+    conv4_2: ConvBlock2d<B>,
+    conv4_3: ConvBlock2d<B>,
+    conv4_4: ConvBlock2d<B>,
+    conv4_5: ConvBlock2d<B>,
+    conv4_6: ConvBlock2d<B>,
+    conv4_7: ConvBlock2d<B>,
+    conv4_8: ConvBlock2d<B>,
+    conv4_9: ConvBlock2d<B>,
+    conv4_10: ConvBlock2d<B>,
     pool4: MaxPool2d,
-    conv5_1: Conv2d<B>,
-    conv5_2: Conv2d<B>,
-    conv5_3: Conv2d<B>,
-    conv5_4: Conv2d<B>,
-    conv5_5: Conv2d<B>,
+    conv5_1: ConvBlock2d<B>,
+    conv5_2: ConvBlock2d<B>,
+    conv5_3: ConvBlock2d<B>,
+    conv5_4: ConvBlock2d<B>,
+    conv5_5: ConvBlock2d<B>,
     pool5: MaxPool2d,
-    conv6_1: Conv2d<B>,
-    conv6_2: Conv2d<B>,
+    conv6_1: ConvBlock2d<B>,
+    conv6_2: ConvBlock2d<B>,
     fc1: Linear<B>,
     fc2: Linear<B>,
-    leaky_relu: LeakyReLU,
     dropout: Dropout,
 }
 
 impl<B: Backend> YoloV1<B> {
     pub fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
         let x = self.conv1.forward(input);
-        let x = self.leaky_relu.forward(x);
         let x = self.pool1.forward(x);
         let x = self.conv2.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.pool2.forward(x);
         let x = self.conv3_1.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv3_2.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv3_3.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv3_4.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x= self.pool3.forward(x);
         let x = self.conv4_1.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv4_2.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv4_3.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv4_4.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv4_5.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv4_6.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv4_7.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv4_8.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv4_9.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv4_10.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.pool4.forward(x);
         let x = self.conv5_1.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv5_2.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv5_3.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv5_4.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.pool5.forward(x);
         let x = self.conv6_1.forward(x);
-        let x = self.leaky_relu.forward(x);
         let x = self.conv6_2.forward(x);
-        let x = self.leaky_relu.forward(x);
 
         let [batch_size, channels, height, width] = x.dims();
         let x = x.reshape([batch_size, channels * height * width]);
@@ -300,7 +324,7 @@ impl<B: Backend> YoloV1<B> {
         let x = self.fc1.forward(x);
         let x = self.dropout.forward(x);
         let x = self.fc2.forward(x);
-        x.reshape([batch_size, 30, 7, 7])
+        x.reshape([batch_size, 30, SEGMENT, SEGMENT])
     }
 
     pub fn forward_regression(&self, images: Tensor<B, 4>, targets: Tensor<B, 4>) -> YoloV1RegressionOutput<B> {
@@ -324,53 +348,43 @@ pub struct YoloV1Config {
 
 impl YoloV1Config {
     pub fn init<B: Backend>(&self, device: &B::Device) -> YoloV1<B> {
-        let conv1 = Conv2dConfig::new([3, 64], [self.segments_number, self.segments_number])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).with_stride([2, 2]).init(device);
+        let conv1 = ConvBlock2dConfig::new(3, 64, self.segments_number)
+            .with_padding(1).with_stride(2).init(device);
         let pool1 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
-        let conv2 = Conv2dConfig::new([64, 192], [3, 3]).init(device);
+        let conv2 = ConvBlock2dConfig::new(64, 192, 3).init(device);
         let pool2 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
-        let conv3_1 = Conv2dConfig::new([192, 128], [1, 1]).init(device);
-        let conv3_2 = Conv2dConfig::new([128, 256], [3, 3]).init(device);
-        let conv3_3 = Conv2dConfig::new([256, 256], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init(device);
-        let conv3_4 = Conv2dConfig::new([256, 512], [3, 3]).init(device);
+        let conv3_1 = ConvBlock2dConfig::new(192, 128, 1).init(device);
+        let conv3_2 = ConvBlock2dConfig::new(128, 256, 3).init(device);
+        let conv3_3 = ConvBlock2dConfig::new(256, 256, 1).with_padding(1).init(device);
+        let conv3_4 = ConvBlock2dConfig::new(256, 512, 3).init(device);
         let pool3 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
-        let conv4_1 = Conv2dConfig::new([512, 256], [1, 1]).init(device);
-        let conv4_2 = Conv2dConfig::new([256, 512], [3, 3]).init(device);
-        let conv4_3 = Conv2dConfig::new([512, 256], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init(device);
-        let conv4_4 = Conv2dConfig::new([256, 512], [3, 3]).init(device);
-        let conv4_5 = Conv2dConfig::new([512, 256], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init(device);
-        let conv4_6 = Conv2dConfig::new([256, 512], [3, 3]).init(device);
-        let conv4_7 = Conv2dConfig::new([512, 256], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init(device);
-        let conv4_8 = Conv2dConfig::new([256, 512], [3, 3]).init(device);
-        let conv4_9 = Conv2dConfig::new([512, 512], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init(device);
-        let conv4_10 = Conv2dConfig::new([512, 1024], [3, 3]).init(device);
+        let conv4_1 = ConvBlock2dConfig::new(512, 256, 1).init(device);
+        let conv4_2 = ConvBlock2dConfig::new(256, 512, 3).init(device);
+        let conv4_3 = ConvBlock2dConfig::new(512, 256, 1).with_padding(1).init(device);
+        let conv4_4 = ConvBlock2dConfig::new(256, 512, 3).init(device);
+        let conv4_5 = ConvBlock2dConfig::new(512, 256, 1).with_padding(1).init(device);
+        let conv4_6 = ConvBlock2dConfig::new(256, 512, 3).init(device);
+        let conv4_7 = ConvBlock2dConfig::new(512, 256, 1).with_padding(1).init(device);
+        let conv4_8 = ConvBlock2dConfig::new(256, 512, 3).init(device);
+        let conv4_9 = ConvBlock2dConfig::new(512, 512, 1).with_padding(1).init(device);
+        let conv4_10 = ConvBlock2dConfig::new(512, 1024, 3).init(device);
         let pool4 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
         
-        let conv5_1 = Conv2dConfig::new([1024, 512], [1, 1]).init(device);
-        let conv5_2 = Conv2dConfig::new([512, 1024], [3, 3]).init(device);
-        let conv5_3 = Conv2dConfig::new([1024, 512], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init(device);
-        let conv5_4 = Conv2dConfig::new([512, 1024], [3, 3]).init(device);
-        let conv5_5 = Conv2dConfig::new([1024, 1024], [3, 3]).init(device);
+        let conv5_1 = ConvBlock2dConfig::new(1024, 512, 1).init(device);
+        let conv5_2 = ConvBlock2dConfig::new(512, 1024, 3).init(device);
+        let conv5_3 = ConvBlock2dConfig::new(1024, 512, 1).with_padding(1).init(device);
+        let conv5_4 = ConvBlock2dConfig::new(512, 1024, 3).init(device);
+        let conv5_5 = ConvBlock2dConfig::new(1024, 1024, 3).init(device);
         let pool5 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
-        let conv6_1 = Conv2dConfig::new([1024, 1024], [3, 3])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init(device);
-        let conv6_2 = Conv2dConfig::new([1024, 1024], [3, 3])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init(device);
+        let conv6_1 = ConvBlock2dConfig::new(1024, 1024, 3).with_padding(1).init(device);
+        let conv6_2 = ConvBlock2dConfig::new(1024, 1024, 3).with_padding(1).init(device);
         let fc1 = LinearConfig::new(1024 * self.segments_number * self.segments_number, 4096).init(device);
         let fc2 = LinearConfig::new(4096, 30 * self.segments_number * self.segments_number).init(device);
-        let relu = ReLU::new();
-        let leaky_relu = LeakyReLU::new();
         let dropout = DropoutConfig::new(self.dropout_prob).init();
 
         YoloV1 {
@@ -404,59 +418,48 @@ impl YoloV1Config {
             conv6_2,
             fc1,
             fc2,
-            leaky_relu,
             dropout,
         }
     }
 
     pub fn init_with<B: Backend>(&self, record: YoloV1Record<B>) -> YoloV1<B> {
-        let conv1 = Conv2dConfig::new([3, 64], [self.segments_number, self.segments_number])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).with_stride([2, 2]).init_with(record.conv1);
+        let conv1 = ConvBlock2dConfig::new(3, 64, self.segments_number)
+            .with_padding(1).with_stride(2).init_with(record.conv1);
         let pool1 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
-        let conv2 = Conv2dConfig::new([64, 192], [3, 3]).init_with(record.conv2);
+        let conv2 = ConvBlock2dConfig::new(64, 192, 3).init_with(record.conv2);
         let pool2 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
-        let conv3_1 = Conv2dConfig::new([192, 128], [1, 1]).init_with(record.conv3_1);
-        let conv3_2 = Conv2dConfig::new([128, 256], [3, 3]).init_with(record.conv3_2);
-        let conv3_3 = Conv2dConfig::new([256, 256], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv3_3);
-        let conv3_4 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv3_4);
+        let conv3_1 = ConvBlock2dConfig::new(192, 128, 1).init_with(record.conv3_1);
+        let conv3_2 = ConvBlock2dConfig::new(128, 256, 3).init_with(record.conv3_2);
+        let conv3_3 = ConvBlock2dConfig::new(256, 256, 1).with_padding(1).init_with(record.conv3_3);
+        let conv3_4 = ConvBlock2dConfig::new(256, 512, 3).init_with(record.conv3_4);
         let pool3 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
-        let conv4_1 = Conv2dConfig::new([512, 256], [1, 1]).init_with(record.conv4_1);
-        let conv4_2 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv4_2);
-        let conv4_3 = Conv2dConfig::new([512, 256], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv4_3);
-        let conv4_4 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv4_4);
-        let conv4_5 = Conv2dConfig::new([512, 256], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv4_5);
-        let conv4_6 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv4_6);
-        let conv4_7 = Conv2dConfig::new([512, 256], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv4_7);
-        let conv4_8 = Conv2dConfig::new([256, 512], [3, 3]).init_with(record.conv4_8);
-        let conv4_9 = Conv2dConfig::new([512, 512], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv4_9);
-        let conv4_10 = Conv2dConfig::new([512, 1024], [3, 3]).init_with(record.conv4_10);
+        let conv4_1 = ConvBlock2dConfig::new(512, 256, 1).init_with(record.conv4_1);
+        let conv4_2 = ConvBlock2dConfig::new(256, 512, 3).init_with(record.conv4_2);
+        let conv4_3 = ConvBlock2dConfig::new(512, 256, 1).init_with(record.conv4_3);
+        let conv4_4 = ConvBlock2dConfig::new(256, 512, 3).init_with(record.conv4_4);
+        let conv4_5 = ConvBlock2dConfig::new(512, 256, 1).init_with(record.conv4_5);
+        let conv4_6 = ConvBlock2dConfig::new(256, 512, 3).init_with(record.conv4_6);
+        let conv4_7 = ConvBlock2dConfig::new(512, 256, 1).init_with(record.conv4_7);
+        let conv4_8 = ConvBlock2dConfig::new(256, 512, 3).init_with(record.conv4_8);
+        let conv4_9 = ConvBlock2dConfig::new(512, 512, 1).init_with(record.conv4_9);
+        let conv4_10 = ConvBlock2dConfig::new(512, 1024, 3).init_with(record.conv4_10);
         let pool4 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
         
-        let conv5_1 = Conv2dConfig::new([1024, 512], [1, 1]).init_with(record.conv5_1);
-        let conv5_2 = Conv2dConfig::new([512, 1024], [3, 3]).init_with(record.conv5_2);
-        let conv5_3 = Conv2dConfig::new([1024, 512], [1, 1])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv5_3);
-        let conv5_4 = Conv2dConfig::new([512, 1024], [3, 3]).init_with(record.conv5_4);
-        let conv5_5 = Conv2dConfig::new([1024, 1024], [3, 3]).init_with(record.conv5_5);
+        let conv5_1 = ConvBlock2dConfig::new(1024, 512, 1).init_with(record.conv5_1);
+        let conv5_2 = ConvBlock2dConfig::new(512, 1024, 3).init_with(record.conv5_2);
+        let conv5_3 = ConvBlock2dConfig::new(1024, 512, 1).init_with(record.conv5_3);
+        let conv5_4 = ConvBlock2dConfig::new(512, 1024, 3).init_with(record.conv5_4);
+        let conv5_5 = ConvBlock2dConfig::new(1024, 1024, 3).init_with(record.conv5_5);
         let pool5 = MaxPool2dConfig::new([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1)).with_strides([2, 2]).init();
-        let conv6_1 = Conv2dConfig::new([1024, 1024], [3, 3])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv6_1);
-        let conv6_2 = Conv2dConfig::new([1024, 1024], [3, 3])
-            .with_padding(PaddingConfig2d::Explicit(1, 1)).init_with(record.conv6_2);
+        let conv6_1 = ConvBlock2dConfig::new(1024, 1024, 3).with_padding(1).init_with(record.conv6_1);
+        let conv6_2 = ConvBlock2dConfig::new(1024, 1024, 3).with_padding(1).init_with(record.conv6_2);
         let fc1 = LinearConfig::new(1024 * self.segments_number * self.segments_number, 4096).init_with(record.fc1);
         let fc2 = LinearConfig::new(4096, 30 * self.segments_number * self.segments_number).init_with(record.fc2);
-        let relu = ReLU::new();
-        let leaky_relu = LeakyReLU::new();
         let dropout = DropoutConfig::new(self.dropout_prob).init();
 
         YoloV1 {
@@ -490,7 +493,6 @@ impl YoloV1Config {
             conv6_2,
             fc1,
             fc2,
-            leaky_relu,
             dropout,
         }
     }
